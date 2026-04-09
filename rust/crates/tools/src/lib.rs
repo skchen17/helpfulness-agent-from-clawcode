@@ -4315,6 +4315,7 @@ fn write_agent_manifest(manifest: &AgentOutput) -> Result<(), String> {
     .map_err(|error| format!("failed to write agent manifest `{manifest_file}`: {error}"))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn persist_agent_terminal_state(
     manifest: &AgentOutput,
     status: &str,

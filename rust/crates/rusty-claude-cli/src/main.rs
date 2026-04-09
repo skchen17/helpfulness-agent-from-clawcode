@@ -6887,8 +6887,6 @@ fn format_context_window_blocked_error(session_id: &str, error: &api::ApiError) 
         }
         _ => {}
     }
-            let resolved_model = resolve_repl_model(model);
-
     lines.push(String::new());
     lines.push("Recovery".to_string());
     lines.push("  Compact          /compact".to_string());
@@ -10794,7 +10792,7 @@ UU conflicted.rs",
             None,
         );
         let heartbeat = format_internal_prompt_progress_line(
-            let mut cli = LiveCli::new(resolved_model, true, allowed_tools, permission_mode)?;
+            InternalPromptProgressEvent::Heartbeat,
             &snapshot,
             Duration::from_secs(9),
             None,
