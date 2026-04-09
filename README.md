@@ -1,4 +1,4 @@
-# HELPFULNESS AGENT Claw Code (Rust)
+# HELPFULNESS AGENT from Claw Code (Rust)
 
 Claw Code is a Rust CLI agent runtime. The main executable is `claw`, built from
 `crates/rusty-claude-cli`.
