@@ -1,0 +1,38 @@
+__pycache__/
+archive/
+.omx/
+.clawd-agents/
+
+# Claude/Claw local artifacts
+.claude/settings.local.json
+.claude/sessions/
+.claw/settings.local.json
+.claw/sessions/
+rust/.claude/sessions/
+rust/.claw/settings.local.json
+rust/.claw/sessions/
+.memory/
+
+# Rust build artifacts
+rust/target/
+
+# Windows metadata files
+*:Zone.Identifier
+
+# Local temporary patch scripts
+.tmp_*.ps1
+tmp_patch_tools_callchain.py
+
+# Nested local repo clone
+claw-code/
+
+# Nested local session artifacts
+**/.claw/sessions/
+**/.claude/sessions/
+**/.claw/settings.local.json
+
+# Local rust workspace artifacts
+rust/.clawd-todos.json
+rust/.sandbox-home/
+rust/.tmp_*
+rust/=*
