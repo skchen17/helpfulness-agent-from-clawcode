@@ -17,10 +17,7 @@ cargo build --workspace
 # Run the interactive REPL
 cargo run -p rusty-claude-cli -- --model google/gemma-4-26b-a4b
 claw-code-main/rust/target/debug/claw --model google/gemma-4-26b-a4b
-/home/chenlu/claw-code-main/rust/target/debug/claw --model qwen/qwen3.5-397b-a17b
-bash -lc "cd /home/chenlu/claw-code-main/rust; cargo build -p rusty-claude-cli; ./target/debug/claw"
 
-export CLAW_MEMORY_AGENT_SCRIPT=/home/chenlu/claw-code-main/rust/agents/memory_agent.py
 # One-shot prompt
 cargo run -p rusty-claude-cli -- prompt "explain this codebase"
 
