@@ -1,4 +1,4 @@
-# Claw Code (Rust)
+#HELPFULNESS AGENT Claw Code (Rust)
 
 Claw Code is a Rust CLI agent runtime. The main executable is `claw`, built from
 `crates/rusty-claude-cli`.
@@ -36,6 +36,13 @@ export OPENAI_BASE_URL="http://127.0.0.1:1234/v1"
 
 You can also set these through local runtime config in `.claw/settings.local.json`
 with an `env` object.
+{
+	"model": "####/####",
+	"env": {
+		"OPENAI_API_KEY": "sk-####",
+		"OPENAI_BASE_URL": "http://127.0.0.1:1234/v1"
+	}
+}
 
 ## Useful Commands
 
