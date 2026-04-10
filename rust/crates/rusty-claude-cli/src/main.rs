@@ -23,6 +23,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
+
 use api::{
     detect_provider_kind, oauth_token_is_expired, resolve_startup_auth_source, AnthropicClient,
     AuthSource, ContentBlockDelta, ImageSource, InputContentBlock, InputMessage, MessageRequest,
@@ -278,7 +281,10 @@ fn apply_runtime_env_overrides_for_cwd(cwd: &Path) {
     let Ok(runtime_config) = loader.load() else {
         return;
     };
-    let Some(config_env) = runtime_config.get("env").and_then(|value| value.as_object()) else {
+    let Some(config_env) = runtime_config
+        .get("env")
+        .and_then(|value| value.as_object())
+    else {
         return;
     };
 
@@ -298,7 +304,8 @@ fn apply_runtime_env_overrides_for_cwd(cwd: &Path) {
 }
 
 fn apply_runtime_env_overrides_for_cli_context() {
-    let base_dir = resolve_runtime_config_base_dir_for_cli_env().or_else(|| env::current_dir().ok());
+    let base_dir =
+        resolve_runtime_config_base_dir_for_cli_env().or_else(|| env::current_dir().ok());
     if let Some(base_dir) = base_dir {
         apply_runtime_env_overrides_for_cwd(&base_dir);
     }
@@ -322,8 +329,7 @@ fn resolve_runtime_config_base_dir_for_cli_env() -> Option<PathBuf> {
 
 fn find_runtime_config_base_from_path(path: &Path) -> Option<PathBuf> {
     let base = if path.is_file() { path.parent()? } else { path };
-    base
-        .ancestors()
+    base.ancestors()
         .find(|candidate| has_project_runtime_config(candidate))
         .map(Path::to_path_buf)
 }
@@ -2965,6 +2971,7 @@ struct LiveCli {
     runtime: BuiltRuntime,
     session: SessionHandle,
     prompt_history: Vec<PromptHistoryEntry>,
+    pending_image_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -3444,6 +3451,100 @@ impl HookAbortMonitor {
     }
 }
 
+fn parse_image_paths_argument(argument: Option<&str>) -> Result<Vec<String>, String> {
+    let usage =
+        "Usage: /image <path ...>\nTip: quote paths with spaces, e.g. /image \"docs/my image.png\"";
+
+    let Some(argument) = argument.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err(usage.to_string());
+    };
+
+    let mut paths = Vec::new();
+    let mut current = String::new();
+    let mut active_quote: Option<char> = None;
+
+    for ch in argument.chars() {
+        if let Some(quote) = active_quote {
+            if ch == quote {
+                active_quote = None;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' => active_quote = Some(ch),
+            value if value.is_whitespace() => {
+                if !current.is_empty() {
+                    paths.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if active_quote.is_some() {
+        return Err("Unclosed quote in /image arguments.".to_string());
+    }
+    if !current.is_empty() {
+        paths.push(current);
+    }
+    if paths.is_empty() {
+        return Err(usage.to_string());
+    }
+
+    Ok(paths)
+}
+
+fn image_media_type_for_path(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        "svg" => Some("image/svg+xml"),
+        _ => None,
+    }
+}
+
+fn load_image_content_block(path: &Path) -> Result<ContentBlock, String> {
+    let media_type = image_media_type_for_path(path).ok_or_else(|| {
+        format!(
+            "unsupported image file extension: {}\nSupported extensions: png, jpg, jpeg, gif, webp, bmp, svg",
+            path.display()
+        )
+    })?;
+    let bytes = fs::read(path)
+        .map_err(|error| format!("failed to read image file {}: {error}", path.display()))?;
+    if bytes.is_empty() {
+        return Err(format!("image file is empty: {}", path.display()));
+    }
+
+    Ok(ContentBlock::Image {
+        media_type: media_type.to_string(),
+        data: BASE64_STANDARD.encode(bytes),
+    })
+}
+
+fn build_user_message_with_images(
+    input: &str,
+    image_paths: &[PathBuf],
+) -> Result<ConversationMessage, String> {
+    let mut blocks = Vec::with_capacity(image_paths.len() + 1);
+    blocks.push(ContentBlock::Text {
+        text: input.to_string(),
+    });
+
+    for path in image_paths {
+        blocks.push(load_image_content_block(path)?);
+    }
+
+    Ok(ConversationMessage::user_blocks(blocks))
+}
+
 impl LiveCli {
     fn new(
         model: String,
@@ -3473,6 +3574,7 @@ impl LiveCli {
             runtime,
             session,
             prompt_history: Vec::new(),
+            pending_image_paths: Vec::new(),
         };
         cli.persist_session()?;
         Ok(cli)
@@ -3566,6 +3668,25 @@ impl LiveCli {
     }
 
     fn run_turn(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let queued_image_count = self.pending_image_paths.len();
+        let queued_user_message = if queued_image_count > 0 {
+            match build_user_message_with_images(input, &self.pending_image_paths) {
+                Ok(message) => Some(message),
+                Err(error) => {
+                    self.pending_image_paths.clear();
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "{error}\nQueued images were cleared. Run /image <path ...> again to re-attach."
+                        ),
+                    )
+                    .into());
+                }
+            }
+        } else {
+            None
+        };
+
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(true)?;
         let mut spinner = Spinner::new();
         let mut stdout = io::stdout();
@@ -3575,17 +3696,30 @@ impl LiveCli {
             &mut stdout,
         )?;
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
-        let result = runtime.run_turn(input, Some(&mut permission_prompter));
+        let result = if let Some(user_message) = queued_user_message {
+            runtime.run_turn_with_message(user_message, input, Some(&mut permission_prompter))
+        } else {
+            runtime.run_turn(input, Some(&mut permission_prompter))
+        };
         hook_abort_monitor.stop();
         match result {
             Ok(summary) => {
                 self.replace_runtime(runtime)?;
+                if queued_image_count > 0 {
+                    self.pending_image_paths.clear();
+                }
                 spinner.finish(
                     "✨ Done",
                     TerminalRenderer::new().color_theme(),
                     &mut stdout,
                 )?;
                 println!();
+                if queued_image_count > 0 {
+                    println!(
+                        "Attached        {queued_image_count} queued image{}",
+                        if queued_image_count == 1 { "" } else { "s" }
+                    );
+                }
                 if let Some(event) = summary.auto_compaction {
                     println!(
                         "{}",
@@ -3605,6 +3739,84 @@ impl LiveCli {
                 Err(Box::new(error))
             }
         }
+    }
+
+    fn handle_image_command(
+        &mut self,
+        path_argument: Option<String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let argument = path_argument
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        if let Some("--clear") = argument {
+            let cleared = self.pending_image_paths.len();
+            self.pending_image_paths.clear();
+            println!("Image queue cleared ({cleared} pending image(s) removed).");
+            return Ok(());
+        }
+
+        if argument.is_none() {
+            if self.pending_image_paths.is_empty() {
+                println!(
+                    "Usage: /image <path ...>\nTip: quote paths with spaces, e.g. /image \"docs/my image.png\""
+                );
+            } else {
+                println!(
+                    "Queued images\n  Pending          {}\n  Hint             run /image --clear to reset the queue",
+                    self.pending_image_paths.len()
+                );
+                for path in &self.pending_image_paths {
+                    println!("  File             {}", path.display());
+                }
+            }
+            return Ok(());
+        }
+
+        let paths = parse_image_paths_argument(argument)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let mut added_paths = Vec::new();
+
+        for raw_path in paths {
+            let path = PathBuf::from(&raw_path);
+            let resolved = fs::canonicalize(&path).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("image path not found: {} ({error})", path.display()),
+                )
+            })?;
+            if !resolved.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("image path is not a file: {}", resolved.display()),
+                )
+                .into());
+            }
+            if image_media_type_for_path(&resolved).is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "unsupported image file extension: {}\nSupported extensions: png, jpg, jpeg, gif, webp, bmp, svg",
+                        resolved.display()
+                    ),
+                )
+                .into());
+            }
+
+            self.pending_image_paths.push(resolved.clone());
+            added_paths.push(resolved);
+        }
+
+        println!(
+            "Image queue updated\n  Added            {}\n  Pending          {}\n  Next step        send a prompt to include queued images",
+            added_paths.len(),
+            self.pending_image_paths.len()
+        );
+        for path in added_paths {
+            println!("  File             {}", path.display());
+        }
+        Ok(())
     }
 
     fn run_turn_with_output(
@@ -3782,6 +3994,10 @@ impl LiveCli {
                 }
                 false
             }
+            SlashCommand::Image { path } => {
+                self.handle_image_command(path)?;
+                false
+            }
             SlashCommand::Doctor => {
                 println!("{}", render_doctor_report()?.render());
                 false
@@ -3796,7 +4012,6 @@ impl LiveCli {
             | SlashCommand::Feedback
             | SlashCommand::Files
             | SlashCommand::Fast
-            | SlashCommand::Image { .. }
             | SlashCommand::Exit
             | SlashCommand::Summary
             | SlashCommand::Desktop
@@ -4022,6 +4237,7 @@ impl LiveCli {
             None,
         )?;
         self.replace_runtime(runtime)?;
+        self.pending_image_paths.clear();
         println!(
             "Session cleared\n  Mode             fresh session\n  Previous session {}\n  Resume previous  /resume {}\n  Preserved model  {}\n  Permission mode  {}\n  New session      {}\n  Session file     {}",
             previous_session.id,
@@ -4064,6 +4280,7 @@ impl LiveCli {
             None,
         )?;
         self.replace_runtime(runtime)?;
+        self.pending_image_paths.clear();
         self.session = SessionHandle {
             id: session_id,
             path: handle.path,
@@ -8003,19 +8220,20 @@ fn print_help(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::
 mod tests {
     use super::{
         build_runtime_plugin_state_with_loader, build_runtime_with_plugin_state,
-        collect_session_prompt_history, create_managed_session_handle, describe_tool_progress,
-        filter_tool_specs, format_bughunter_report, format_commit_preflight_report,
-        format_commit_skipped_report, format_compact_report, format_connected_line,
-        format_cost_report, format_history_timestamp, format_internal_prompt_progress_line,
-        format_issue_report, format_model_report, format_model_switch_report,
-        format_permissions_report, format_permissions_switch_report, format_pr_report,
-        format_resume_report, format_status_report, format_tool_call_start, format_tool_result,
-        format_ultraplan_report, format_unknown_slash_command,
+        build_user_message_with_images, collect_session_prompt_history,
+        create_managed_session_handle, describe_tool_progress, filter_tool_specs,
+        format_bughunter_report, format_commit_preflight_report, format_commit_skipped_report,
+        format_compact_report, format_connected_line, format_cost_report, format_history_timestamp,
+        format_internal_prompt_progress_line, format_issue_report, format_model_report,
+        format_model_switch_report, format_permissions_report, format_permissions_switch_report,
+        format_pr_report, format_resume_report, format_status_report, format_tool_call_start,
+        format_tool_result, format_ultraplan_report, format_unknown_slash_command,
         format_unknown_slash_command_message, format_user_visible_api_error,
-        merge_prompt_with_stdin, normalize_permission_mode, parse_args, parse_export_args,
-        parse_git_status_branch, parse_git_status_metadata_for, parse_git_workspace_summary,
-        parse_history_count, permission_policy, print_help_to, push_output_block,
-        render_config_report, render_diff_report, render_diff_report_for, render_memory_report,
+        image_media_type_for_path, merge_prompt_with_stdin, normalize_permission_mode, parse_args,
+        parse_export_args, parse_git_status_branch, parse_git_status_metadata_for,
+        parse_git_workspace_summary, parse_history_count, parse_image_paths_argument,
+        permission_policy, print_help_to, push_output_block, render_config_report,
+        render_diff_report, render_diff_report_for, render_memory_report,
         render_prompt_history_report, render_repl_help, render_resume_usage,
         render_session_markdown, resolve_model_alias, resolve_model_alias_with_config,
         resolve_repl_model, resolve_session_reference, response_to_events,
@@ -8462,7 +8680,10 @@ mod tests {
         std::fs::remove_dir_all(root).expect("temp config root should clean up");
 
         assert_eq!(resolved_api_key.as_deref(), Some("config-openai-key"));
-        assert_eq!(resolved_base_url.as_deref(), Some("https://example.test/v1"));
+        assert_eq!(
+            resolved_base_url.as_deref(),
+            Some("https://example.test/v1")
+        );
     }
 
     #[test]
@@ -8526,8 +8747,7 @@ mod tests {
             .expect("binary parent should exist");
         std::fs::write(project.join(".claw").join("settings.json"), "{}")
             .expect("project settings should write");
-        std::fs::write(&binary, "#!/bin/sh\n")
-            .expect("fake binary should write");
+        std::fs::write(&binary, "#!/bin/sh\n").expect("fake binary should write");
 
         let resolved = super::find_runtime_config_base_from_path(&binary);
 
@@ -11322,6 +11542,63 @@ UU conflicted.rs",
                 assert_eq!(reasoning_effort.as_deref(), Some(value));
             }
         }
+    }
+
+    #[test]
+    fn parse_image_paths_argument_supports_quotes_and_spaces() {
+        let parsed =
+            parse_image_paths_argument(Some("docs/a.png \"docs/my image.jpg\" 'docs/c.gif'"))
+                .expect("image arguments should parse");
+        assert_eq!(
+            parsed,
+            vec![
+                "docs/a.png".to_string(),
+                "docs/my image.jpg".to_string(),
+                "docs/c.gif".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn image_media_type_for_path_matches_common_extensions() {
+        assert_eq!(
+            image_media_type_for_path(Path::new("diagram.PNG")),
+            Some("image/png")
+        );
+        assert_eq!(
+            image_media_type_for_path(Path::new("photo.JpEg")),
+            Some("image/jpeg")
+        );
+        assert_eq!(image_media_type_for_path(Path::new("notes.txt")), None);
+    }
+
+    #[test]
+    fn build_user_message_with_images_embeds_base64_image_block() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("temp dir should create");
+        let image_path = root.join("sample.png");
+        fs::write(&image_path, [0_u8, 1_u8, 2_u8]).expect("image bytes should write");
+
+        let message = build_user_message_with_images("describe", &[image_path])
+            .expect("image message should build");
+
+        assert_eq!(message.role, MessageRole::User);
+        assert_eq!(message.blocks.len(), 2);
+        assert_eq!(
+            message.blocks[0],
+            ContentBlock::Text {
+                text: "describe".to_string()
+            }
+        );
+        assert_eq!(
+            message.blocks[1],
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "AAEC".to_string()
+            }
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

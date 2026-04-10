@@ -21,6 +21,26 @@ cargo build -p rusty-claude-cli
 ./target/debug/claw prompt "summarize this repository"
 ```
 
+## Windows Quick Start (PowerShell)
+
+```powershell
+cd rust
+
+# Build CLI
+cargo build -p rusty-claude-cli
+
+# Show help
+.\target\debug\claw.exe --help
+
+# Interactive session
+.\target\debug\claw.exe
+
+# One-shot prompt
+.\target\debug\claw.exe prompt "summarize this repository"
+```
+
+If you prefer Linux-style commands on Windows, run through WSL instead.
+
 ## Provider Configuration
 
 Set one of the provider configurations:
@@ -68,7 +88,7 @@ cargo fmt
   - `doctor`, `status`, `sandbox`, `skills`, `agents`, `mcp`, `login`, `logout`
 - Rich tool runtime
   - File tools (`read`, `write`, `edit`, `glob`, `grep`)
-  - Shell execution (`bash`)
+  - Shell execution (`bash`, `PowerShell`)
   - Web tools (`search`, `fetch`)
   - Agent/task-oriented tool surfaces
 - Runtime safety and control
@@ -86,9 +106,6 @@ cargo fmt
 rust/
 ├── Cargo.toml
 ├── Cargo.lock
-├── agents/
-├── prompts/
-├── scripts/
 └── crates/
     ├── api/
     ├── commands/

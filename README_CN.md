@@ -75,7 +75,7 @@ cargo fmt
   - `doctor`, `status`, `sandbox`, `skills`, `agents`, `mcp`, `login`, `logout`
 - 丰富的工具运行时
   - 文件工具 (`read`, `write`, `edit`, `glob`, `grep`)
-  - Shell 执行 (`bash`)
+  - Shell 执行 (`bash`，`PowerShell`)
   - Web 工具 (`search`, `fetch`)
   - 面向代理/任务的工具界面
 - 运行时安全与控制

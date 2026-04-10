@@ -75,7 +75,7 @@ cargo fmt
   - `doctor`, `status`, `sandbox`, `skills`, `agents`, `mcp`, `login`, `logout`
 - Rich tool runtime
   - File tools (`read`, `write`, `edit`, `glob`, `grep`)
-  - Shell execution (`bash`)
+  - Shell execution (`bash`, `PowerShell`)
   - Web tools (`search`, `fetch`)
   - Agent/task-oriented tool surfaces
 - Runtime safety and control
